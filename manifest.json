@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "Faceit MaxElo",
+  "description": "Shows each player's highest-ever ELO and computed team win chance inside Faceit CS2 match rooms.",
+  "version": "0.1.0",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://www.faceit.com/*",
+    "https://faceitanalyser.com/*"
+  ],
+  "icons": {
+    "16": "logo.png",
+    "32": "logo.png",
+    "48": "logo.png",
+    "128": "logo.png"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.faceit.com/*"],
+      "js": ["content.js"],
+      "css": ["styles.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["logo.png"],
+      "matches": ["https://www.faceit.com/*"]
+    }
+  ]
+}
