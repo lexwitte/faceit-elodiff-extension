@@ -1,12 +1,13 @@
 {
   "manifest_version": 3,
-  "name": "Faceit MaxElo",
-  "description": "Shows each player's highest-ever ELO and computed team win chance inside Faceit CS2 match rooms.",
-  "version": "0.1.0",
+  "name": "FACEIT Elo Diff",
+  "description": "Compare current, last-season, and peak ELO for every FACEIT CS2 match room player, with team deltas and win odds.",
+  "version": "0.2.0",
   "permissions": ["storage"],
   "host_permissions": [
     "https://www.faceit.com/*",
-    "https://faceitanalyser.com/*"
+    "https://faceitanalyser.com/*",
+    "https://ru.faceitanalyser.com/*"
   ],
   "icons": {
     "16": "logo.png",

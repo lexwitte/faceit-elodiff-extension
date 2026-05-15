@@ -4,6 +4,8 @@
   const PANEL_ID = "fme-panel";
   const LAUNCHER_ID = "fme-launcher";
   const STORAGE_POS = "fme:position";
+  const OUTLIER_LOW_DELTA_MULTIPLIER = 0.67;
+  const OUTLIER_HIGH_DELTA_MULTIPLIER = 1.5;
 
   const LOGO_URL = chrome.runtime.getURL("logo.png");
 
@@ -15,7 +17,7 @@
     minimizedForMatch: null
   };
 
-  function isMinimized() {
+  function isMinimized() { 
     return STATE.minimizedForMatch != null && STATE.minimizedForMatch === currentMatchId();
   }
 
@@ -46,7 +48,7 @@
   }
 
   function winChance(eloA, eloB) {
-    return 1 / (1 + Math.pow(10, (eloB - eloA) / 1e3));
+    return 1 / (1 + Math.pow(10, (eloB - eloA) / 600));
   }
 
   function normalizeRoster(faction) {
@@ -71,20 +73,34 @@
     };
   }
 
-  async function loadHighestElos(teams) {
+  async function loadPlayerStats(teams, { force = false } = {}) {
     const all = [...teams.faction1.players, ...teams.faction2.players];
     const unique = [...new Map(all.map((p) => [p.nickname, p])).values()];
     const results = await Promise.all(
       unique.map(async (p) => {
-        const r = await sendMessage({ type: "getHighestElo", nickname: p.nickname });
-        return [p.nickname, r];
+        const [highest, season] = await Promise.all([
+          sendMessage({ type: "getHighestElo", nickname: p.nickname, force }),
+          sendMessage({ type: "getSeasonSummary", userId: p.id, force })
+        ]);
+        return [p.nickname, { highest, season }];
       })
     );
     const byNickname = new Map(results);
     const annotate = (team) =>
       team.players.map((p) => {
         const r = byNickname.get(p.nickname) || {};
-        return { ...p, highestElo: r.highestElo ?? null, cached: !!r.cached, eloError: r.error || null };
+        const highest = r.highest || {};
+        const season = r.season || {};
+        return {
+          ...p,
+          highestElo: highest.highestElo ?? null,
+          lastSeasonElo: season.lastSeasonElo ?? null,
+          winStreak: season.winStreak ?? null,
+          cached: !!highest.cached,
+          seasonCached: !!season.seasonCached,
+          eloError: highest.error || null,
+          seasonError: season.seasonError || season.error || null
+        };
       });
     return {
       faction1: { ...teams.faction1, players: annotate(teams.faction1) },
@@ -94,12 +110,49 @@
 
   function teamSummary(team) {
     const elos = team.players.map((p) => p.elo).filter((v) => typeof v === "number");
+    const lastSeasonElos = team.players.map((p) => p.lastSeasonElo).filter((v) => typeof v === "number");
     const highs = team.players.map((p) => p.highestElo).filter((v) => typeof v === "number");
     return {
       avgElo: avg(elos),
+      avgLastSeason: avg(lastSeasonElos),
       avgHighest: avg(highs),
       nCurrent: elos.length,
+      nLastSeason: lastSeasonElos.length,
       nHighest: highs.length
+    };
+  }
+
+  function teamWinDelta(a, b) {
+    let delta = 0;
+    let n = 0;
+    if (a.nCurrent && b.nCurrent) {
+      delta += a.avgElo - b.avgElo;
+      n += 1;
+    }
+    if (a.nLastSeason && b.nLastSeason) {
+      delta += a.avgLastSeason - b.avgLastSeason;
+      n += 1;
+    }
+    if (a.nHighest && b.nHighest) {
+      delta += a.avgHighest - b.avgHighest;
+      n += 1;
+    }
+    return n ? delta : null;
+  }
+
+  function roomOutlierMetrics(teams) {
+    const players = [...teams.faction1.players, ...teams.faction2.players];
+    const currentElos = players.map((p) => p.elo).filter((v) => typeof v === "number");
+    const lastSeasonDeltas = players
+      .filter((p) => typeof p.elo === "number" && typeof p.lastSeasonElo === "number")
+      .map((p) => p.lastSeasonElo - p.elo);
+    const highestDeltas = players
+      .filter((p) => typeof p.elo === "number" && typeof p.highestElo === "number")
+      .map((p) => p.highestElo - p.elo);
+    return {
+      avgCurrent: currentElos.length ? avg(currentElos) : null,
+      avgLastSeasonDelta: lastSeasonDeltas.length ? avg(lastSeasonDeltas) : null,
+      avgHighestDelta: highestDeltas.length ? avg(highestDeltas) : null
     };
   }
 
@@ -120,41 +173,142 @@
     return v == null ? "—" : Math.round(v).toString();
   }
 
-  function renderTeamBlock(label, team, colorClass, opponentAvgHighest = null) {
+  function formatDelta(v) {
+    if (v == null) return "—";
+    const rounded = Math.round(v);
+    return `${rounded >= 0 ? "+" : ""}${rounded}`;
+  }
+
+  function outlierMeta(metricValue, averageMetric, displayDelta, averageText) {
+    if (typeof metricValue !== "number" || typeof displayDelta !== "number") {
+      return { className: "", title: null };
+    }
+    const deltaText = `Δ ${formatDelta(displayDelta)}`;
+    if (typeof averageMetric !== "number" || averageMetric <= 0) return { className: "", title: deltaText };
+    if (metricValue < averageMetric * OUTLIER_LOW_DELTA_MULTIPLIER) {
+      return {
+        className: " fme-outlier-low",
+        title: `${deltaText}, below ${OUTLIER_LOW_DELTA_MULTIPLIER}x ${averageText}`
+      };
+    }
+    if (metricValue > averageMetric * OUTLIER_HIGH_DELTA_MULTIPLIER) {
+      return {
+        className: " fme-outlier-high",
+        title: `${deltaText}, above ${OUTLIER_HIGH_DELTA_MULTIPLIER}x ${averageText}`
+      };
+    }
+    return { className: "", title: deltaText };
+  }
+
+  function columnCompareMeta(hasValue, value, opponentHasValue, opponentValue) {
+    if (!hasValue || !opponentHasValue || value === opponentValue) {
+      return { arrow: "·", className: "fme-team-stat fme-team-stat-min" };
+    }
+    if (value > opponentValue) {
+      return { arrow: "↑", className: "fme-team-stat fme-team-stat-max" };
+    }
+    return { arrow: "↓", className: "fme-team-stat fme-team-stat-min" };
+  }
+
+  function columnTitle(label, teamDelta, opponentDelta) {
+    const parts = [];
+    if (teamDelta != null) parts.push(`${label} Δ ${formatDelta(teamDelta)}`);
+    parts.push(`vs other team Δ ${formatDelta(opponentDelta)}`);
+    return parts.join(", ");
+  }
+
+  function renderTeamBlock(label, team, colorClass, opponentSummary = null, roomMetrics = {}) {
     const summary = teamSummary(team);
-    const isHigher = opponentAvgHighest != null && summary.nHighest
-      ? summary.avgHighest > opponentAvgHighest
+    const averageLastSeasonDelta = summary.nCurrent && summary.nLastSeason
+      ? summary.avgLastSeason - summary.avgElo
+      : 0;
+    const averageHighestDelta = summary.nCurrent && summary.nHighest
+      ? summary.avgHighest - summary.avgElo
+      : 0;
+    const currentVsOpponent = summary.nCurrent && opponentSummary?.nCurrent
+      ? summary.avgElo - opponentSummary.avgElo
       : null;
-    const maxArrow = isHigher === true ? "↑" : isHigher === false ? "↓" : "·";
-    const maxClass = "fme-team-stat" + (isHigher === true ? " fme-team-stat-max" : " fme-team-stat-min");
+    const lastSeasonVsOpponent = summary.nLastSeason && opponentSummary?.nLastSeason
+      ? summary.avgLastSeason - opponentSummary.avgLastSeason
+      : null;
+    const highestVsOpponent = summary.nHighest && opponentSummary?.nHighest
+      ? summary.avgHighest - opponentSummary.avgHighest
+      : null;
+    const currentHeader = columnCompareMeta(summary.nCurrent, summary.avgElo, opponentSummary?.nCurrent, opponentSummary?.avgElo);
+    const lastSeasonHeader = columnCompareMeta(summary.nLastSeason, summary.avgLastSeason, opponentSummary?.nLastSeason, opponentSummary?.avgLastSeason);
+    const highestHeader = columnCompareMeta(summary.nHighest, summary.avgHighest, opponentSummary?.nHighest, opponentSummary?.avgHighest);
     const rows = team.players.map((p) => {
-      const diff = p.highestElo != null && p.elo != null ? p.highestElo - p.elo : null;
+      const currentOutlier = outlierMeta(
+        p.elo,
+        roomMetrics.avgCurrent,
+        typeof p.elo === "number" && typeof roomMetrics.avgCurrent === "number" ? p.elo - roomMetrics.avgCurrent : null,
+        `room avg ${formatElo(roomMetrics.avgCurrent)}`
+      );
+      const seasonDelta = typeof p.elo === "number" && typeof p.lastSeasonElo === "number" ? p.lastSeasonElo - p.elo : null;
+      const highestDelta = typeof p.elo === "number" && typeof p.highestElo === "number" ? p.highestElo - p.elo : null;
+      const seasonOutlier = outlierMeta(
+        seasonDelta,
+        roomMetrics.avgLastSeasonDelta,
+        seasonDelta,
+        `room Δ ${formatDelta(roomMetrics.avgLastSeasonDelta)}`
+      );
+      const highestOutlier = outlierMeta(
+        highestDelta,
+        roomMetrics.avgHighestDelta,
+        highestDelta,
+        `room Δ ${formatDelta(roomMetrics.avgHighestDelta)}`
+      );
       const avatar = p.avatar
         ? el("div", { className: "fme-avatar", style: `background-image:url(${p.avatar})` })
         : el("div", { className: "fme-avatar fme-avatar-empty" });
       return el("div", { className: "fme-row" }, [
-        avatar,
-        el("span", { className: "fme-nick", text: p.nickname, title: p.nickname }),
-        el("span", { className: "fme-elo", text: formatElo(p.elo) }),
-        el("span", { className: "fme-arrow", html: "&rsaquo;" }),
+        el("div", { className: "fme-player-name" }, [
+          avatar,
+          el("span", { className: "fme-player-text" }, [
+            el("span", { className: "fme-nick", text: p.nickname, title: p.nickname }),
+            p.winStreak != null
+              ? el("span", { className: "fme-streak", text: `${p.winStreak}W`, title: "Current season win streak" })
+              : null
+          ])
+        ]),
         el("span", {
-          className: "fme-highest" + (p.highestElo == null ? " fme-missing" : ""),
-          text: formatElo(p.highestElo),
-          title: p.eloError ? `Error: ${p.eloError}` : (p.cached ? "from cache" : "fresh")
+          className: "fme-stat fme-elo" + (p.elo == null ? "" : currentOutlier.className),
+          text: formatElo(p.elo),
+          title: currentOutlier.title
         }),
         el("span", {
-          className: "fme-diff" + (diff != null && diff > 0 ? " fme-diff-pos" : " fme-diff-zero"),
-          text: diff != null ? (diff > 0 ? `+${diff}` : `${diff}`) : ""
+          className: "fme-stat fme-season" + (p.lastSeasonElo == null ? " fme-missing" : seasonOutlier.className),
+          text: formatElo(p.lastSeasonElo),
+          title: seasonOutlier.title
+        }),
+        el("span", {
+          className: "fme-stat fme-highest" + (p.highestElo == null ? " fme-missing" : highestOutlier.className),
+          text: formatElo(p.highestElo),
+          title: highestOutlier.title
         })
       ]);
     });
     return el("div", { className: `fme-team ${colorClass}` }, [
       el("div", { className: "fme-team-head" }, [
-        el("span", { className: "fme-team-pip" }),
-        el("span", { className: "fme-team-label", text: label.toUpperCase() }),
-        el("span", { className: "fme-team-stat", text: `Ø ${formatElo(summary.avgElo)}` }),
-        el("span", { className: "fme-team-sep", text: "·" }),
-        el("span", { className: maxClass, text: `${maxArrow} ${formatElo(summary.avgHighest)}` })
+        el("span", { className: "fme-team-title" }, [
+          el("span", { className: "fme-team-pip" }),
+          el("span", { className: "fme-team-label", text: label.toUpperCase() })
+        ]),
+        el("span", {
+          className: currentHeader.className,
+          text: `CUR ${currentHeader.arrow} ${formatElo(summary.nCurrent ? summary.avgElo : null)}`,
+          title: columnTitle("Current ELO", null, currentVsOpponent)
+        }),
+        el("span", {
+          className: lastSeasonHeader.className,
+          text: `LK ${lastSeasonHeader.arrow} ${formatElo(summary.nLastSeason ? summary.avgLastSeason : null)}`,
+          title: columnTitle("Last season ELO", summary.nLastSeason ? averageLastSeasonDelta : null, lastSeasonVsOpponent)
+        }),
+        el("span", {
+          className: highestHeader.className,
+          text: `HI ${highestHeader.arrow} ${formatElo(summary.nHighest ? summary.avgHighest : null)}`,
+          title: columnTitle("Highest ELO", summary.nHighest ? averageHighestDelta : null, highestVsOpponent)
+        })
       ]),
       ...rows
     ]);
@@ -188,8 +342,8 @@
       btn = el("button", {
         id: LAUNCHER_ID,
         className: "fme-launcher",
-        title: "Open Faceit MaxElo",
-        html: `<img src="${LOGO_URL}" alt="MaxElo">`,
+        title: "Open FACEIT Elo Diff",
+        html: `<img src="${LOGO_URL}" alt="ELO DIFF">`,
         onclick: () => setMinimized(false)
       });
       root.appendChild(btn);
@@ -275,7 +429,7 @@
   function renderHeader(panel) {
     return el("div", { className: "fme-header fme-drag-handle" }, [
       el("span", { className: "fme-logo", html: `<img src="${LOGO_URL}" alt="">` }),
-      el("span", { className: "fme-title", text: "MaxElo" }),
+      el("span", { className: "fme-title", text: "Room ELO Diff" }),
       el("span", { className: "fme-spacer" }),
       el("button", {
         className: "fme-btn",
@@ -298,8 +452,9 @@
 
     const s1 = teamSummary(teams.faction1);
     const s2 = teamSummary(teams.faction2);
-    const chance1 = s1.nHighest && s2.nHighest ? winChance(s1.avgHighest, s2.avgHighest) : null;
-    const diff = s1.nHighest && s2.nHighest ? s1.avgHighest - s2.avgHighest : null;
+    const roomMetrics = roomOutlierMetrics(teams);
+    const diff = teamWinDelta(s1, s2);
+    const chance1 = diff != null ? winChance(diff, 0) : null;
 
     const summary = el("div", { className: "fme-summary" }, [
       el("div", { className: "fme-winline" }, [
@@ -309,7 +464,8 @@
         }),
         el("span", {
           className: "fme-winmid",
-          text: diff != null ? `Δ ${diff >= 0 ? "+" : ""}${Math.round(diff)}` : "win chance"
+          text: diff != null ? `Δ ${formatDelta(diff)}` : "win chance",
+          title: "Win chance uses the sum of CUR, LK, and HI average deltas"
         }),
         el("span", {
           className: "fme-win2",
@@ -327,8 +483,8 @@
     panel.append(
       renderHeader(panel),
       summary,
-      renderTeamBlock("Team 1", teams.faction1, "fme-team1", s2.nHighest ? s2.avgHighest : null),
-      renderTeamBlock("Team 2", teams.faction2, "fme-team2", s1.nHighest ? s1.avgHighest : null)
+      renderTeamBlock("Team 1", teams.faction1, "fme-team1", s2, roomMetrics),
+      renderTeamBlock("Team 2", teams.faction2, "fme-team2", s1, roomMetrics)
     );
 
     clampToViewport(panel);
@@ -378,21 +534,10 @@
     try {
       renderStatus("Fetching match…", "loading");
       const teams = await loadTeams(matchId);
-      renderStatus("Fetching highest ELOs…", "loading");
-      const annotated = await loadHighestElos(teams);
-      if (force) {
-        const all = [...annotated.faction1.players, ...annotated.faction2.players];
-        const unique = [...new Map(all.map((p) => [p.nickname, p])).values()];
-        await Promise.all(unique.map((p) =>
-          sendMessage({ type: "getHighestElo", nickname: p.nickname, force: true })
-        ));
-        const refreshed = await loadHighestElos(teams);
-        STATE.data = refreshed;
-        renderPanel(refreshed);
-      } else {
-        STATE.data = annotated;
-        renderPanel(annotated);
-      }
+      renderStatus("Fetching player stats…", "loading");
+      const annotated = await loadPlayerStats(teams, { force });
+      STATE.data = annotated;
+      renderPanel(annotated);
     } catch (err) {
       renderStatus(`Error: ${err?.message || err}`, "error");
     } finally {

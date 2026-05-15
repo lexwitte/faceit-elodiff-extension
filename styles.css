@@ -12,6 +12,7 @@
   --fme-team1: #ff5a3d;
   --fme-team2: #3aa0ff;
   --fme-good: #4cc38a;
+  --fme-bad: #e08585;
 }
 
 #fme-root.fme-hidden { display: none; }
@@ -21,7 +22,7 @@
   top: 88px;
   right: 16px;
   z-index: 2147483000;
-  width: 340px;
+  width: 410px;
   max-height: calc(100vh - 110px);
   overflow: hidden;
   display: flex;
@@ -159,13 +160,21 @@
 #fme-panel .fme-team:last-child { border-bottom: none; }
 
 #fme-panel .fme-team-head {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 68px 68px 68px;
   align-items: center;
   gap: 6px;
   margin-bottom: 8px;
   font-size: 10px;
-  letter-spacing: 1.6px;
+  letter-spacing: 0.8px;
   text-transform: uppercase;
+}
+
+#fme-panel .fme-team-title {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 #fme-panel .fme-team-pip {
@@ -178,38 +187,39 @@
 #fme-panel .fme-team2 .fme-team-pip { background: var(--fme-team2); }
 
 #fme-panel .fme-team-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--fme-text);
   font-weight: 700;
 }
 
 #fme-panel .fme-team-stat {
+  text-align: right;
   color: var(--fme-muted);
-  font-weight: 500;
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
-  letter-spacing: 0.6px;
 }
 
 #fme-panel .fme-team-stat-max { color: var(--fme-orange); font-weight: 700; }
 #fme-panel .fme-team-stat-min { color: var(--fme-muted); }
 
-#fme-panel .fme-team-sep { color: var(--fme-dim); }
-
-#fme-panel .fme-team-head .fme-team-stat:first-of-type { margin-left: auto; }
-
 #fme-panel .fme-row {
   display: grid;
-  grid-template-columns: 22px 1fr 46px 10px 52px 42px;
+  grid-template-columns: minmax(0, 1fr) 68px 68px 68px;
   align-items: center;
   gap: 6px;
-  padding: 4px 0;
+  padding: 3px 0;
   border-top: 1px solid rgba(255, 255, 255, 0.02);
 }
 
-#fme-panel .fme-row:first-of-type { border-top: none; }
+#fme-panel .fme-team-head + .fme-row { border-top: none; }
 
 #fme-panel .fme-avatar {
-  width: 22px;
-  height: 22px;
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
   border-radius: 50%;
   background-size: cover;
   background-position: center;
@@ -219,7 +229,22 @@
 
 #fme-panel .fme-avatar-empty { background-color: var(--fme-bg-3); }
 
+#fme-panel .fme-player-name {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+#fme-panel .fme-player-text {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
 #fme-panel .fme-nick {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -227,36 +252,47 @@
   font-weight: 500;
 }
 
-#fme-panel .fme-elo {
-  text-align: right;
-  color: var(--fme-muted);
-  font-variant-numeric: tabular-nums;
-}
-
-#fme-panel .fme-arrow {
-  color: var(--fme-dim);
-  text-align: center;
-  font-size: 12px;
-}
-
-#fme-panel .fme-highest {
-  text-align: right;
-  color: var(--fme-orange);
+#fme-panel .fme-streak {
+  flex: 0 0 auto;
+  color: var(--fme-good);
+  border: 1px solid rgba(76, 195, 138, 0.28);
+  border-radius: 4px;
+  padding: 0 3px;
+  font-size: 9px;
+  line-height: 14px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
 }
 
-#fme-panel .fme-highest.fme-missing { color: var(--fme-dim); font-weight: 500; }
-
-#fme-panel .fme-diff {
+#fme-panel .fme-stat {
   text-align: right;
-  font-variant-numeric: tabular-nums;
-  font-size: 11px;
   color: var(--fme-muted);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
 }
 
-#fme-panel .fme-diff-pos { color: var(--fme-good); }
-#fme-panel .fme-diff-zero { color: var(--fme-dim); }
+#fme-panel .fme-highest {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+#fme-panel .fme-season {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+#fme-panel .fme-outlier-low {
+  color: var(--fme-bad);
+  font-weight: 700;
+}
+
+#fme-panel .fme-outlier-high {
+  color: var(--fme-good);
+  font-weight: 700;
+}
+
+#fme-panel .fme-season.fme-missing,
+#fme-panel .fme-highest.fme-missing { color: var(--fme-dim); font-weight: 500; }
 
 #fme-panel .fme-loading,
 #fme-panel .fme-error {
