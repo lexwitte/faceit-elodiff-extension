@@ -2,8 +2,8 @@
   --fme-bg: #15171a;
   --fme-bg-2: #1b1e22;
   --fme-bg-3: #23272d;
-  --fme-border: #24282e;
-  --fme-border-2: #2d323a;
+  --fme-border: rgb(36, 36, 36);
+  --fme-border-2: rgb(36, 36, 36);
   --fme-text: #e8eaed;
   --fme-muted: #8a909a;
   --fme-dim: #5d636c;
@@ -13,32 +13,26 @@
   --fme-team2: #3aa0ff;
   --fme-good: #4cc38a;
   --fme-bad: #e08585;
+  width: 100%;
+  min-width: 0;
+  margin-top: 16px;
 }
 
 #fme-root.fme-hidden { display: none; }
 
 #fme-panel {
-  position: fixed;
-  top: 88px;
-  right: 16px;
-  z-index: 2147483000;
-  width: 410px;
-  max-height: calc(100vh - 110px);
+  position: static;
+  width: 100%;
+  box-sizing: border-box;
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  background: var(--fme-bg);
+  background-color: rgb(18, 18, 18);
   color: var(--fme-text);
   border: 1px solid var(--fme-border);
-  border-radius: 10px;
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.02) inset;
+  border-radius: 4px;
   font: 500 12px/1.4 "Play", "Inter", "Segoe UI", Roboto, Arial, sans-serif;
   letter-spacing: 0.1px;
-}
-
-#fme-panel.fme-dragging {
-  transition: none;
-  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.7);
 }
 
 #fme-panel .fme-header {
@@ -46,13 +40,10 @@
   align-items: center;
   gap: 8px;
   padding: 10px 12px;
-  background: linear-gradient(180deg, var(--fme-bg-2) 0%, var(--fme-bg) 100%);
+  background-color: inherit;
   border-bottom: 1px solid var(--fme-border);
   user-select: none;
-  cursor: grab;
 }
-
-#fme-panel.fme-dragging .fme-header { cursor: grabbing; }
 
 #fme-panel .fme-logo {
   display: inline-flex;
@@ -100,6 +91,21 @@
   border-color: var(--fme-border-2);
 }
 
+#fme-panel .fme-collapse-icon {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform 0.2s ease;
+}
+
+#fme-panel.fme-collapsed .fme-collapse-icon { transform: rotate(180deg); }
+
+#fme-panel.fme-collapsed > :not(.fme-header) { display: none; }
+
 #fme-panel .fme-summary {
   padding: 12px 14px 10px;
   border-bottom: 1px solid var(--fme-border);
@@ -112,19 +118,15 @@
   margin-bottom: 6px;
 }
 
-#fme-panel .fme-win1 {
-  color: var(--fme-team1);
+#fme-panel .fme-win1,
+#fme-panel .fme-win2 {
   font-weight: 700;
   font-size: 14px;
   font-variant-numeric: tabular-nums;
 }
 
-#fme-panel .fme-win2 {
-  color: var(--fme-team2);
-  font-weight: 700;
-  font-size: 14px;
-  font-variant-numeric: tabular-nums;
-}
+#fme-panel .fme-win1 { color: var(--fme-team1); }
+#fme-panel .fme-win2 { color: var(--fme-team2); }
 
 #fme-panel .fme-winmid {
   color: var(--fme-muted);
@@ -211,7 +213,7 @@
   align-items: center;
   gap: 6px;
   padding: 3px 0;
-  border-top: 1px solid rgba(255, 255, 255, 0.02);
+  border-top: 1px solid rgba(36, 36, 36, 0.5);
 }
 
 #fme-panel .fme-team-head + .fme-row { border-top: none; }
@@ -255,7 +257,7 @@
 #fme-panel .fme-streak {
   flex: 0 0 auto;
   color: var(--fme-good);
-  border: 1px solid rgba(76, 195, 138, 0.28);
+  border: 1px solid var(--fme-border);
   border-radius: 4px;
   padding: 0 3px;
   font-size: 9px;
@@ -303,37 +305,17 @@
 
 #fme-panel .fme-error { color: #e08585; }
 
-#fme-launcher {
-  position: fixed;
-  right: 20px;
-  bottom: 20px;
-  z-index: 2147483000;
-  width: 48px;
-  height: 48px;
-  border-radius: 10px;
-  border: 1px solid var(--fme-border-2);
-  background: transparent;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  overflow: hidden;
-  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 85, 0, 0.08) inset;
-  padding: 0;
-  transition: transform 0.15s ease, box-shadow 0.15s ease;
+#fme-panel .fme-footer {
+  padding: 7px 14px;
+  border-top: 1px solid var(--fme-border);
+  color: var(--fme-dim);
+  text-align: center;
+  font-size: 10px;
 }
 
-#fme-launcher:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 85, 0, 0.25) inset;
+#fme-panel .fme-footer a {
+  color: var(--fme-muted);
+  text-decoration: none;
 }
 
-#fme-launcher:active { transform: translateY(0); }
-
-#fme-launcher img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-  pointer-events: none;
-}
+#fme-panel .fme-footer a:hover { text-decoration: underline; }

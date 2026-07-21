@@ -1,13 +1,12 @@
 {
   "manifest_version": 3,
   "name": "FACEIT Elo Diff",
-  "description": "Compare current, last-season, and peak ELO for every FACEIT CS2 match room player, with team deltas and win odds.",
-  "version": "0.2.0",
+  "description": "Compare current, last-season, and peak ELO for every FACEIT CS2 match room player, with win odds.",
+  "version": "0.3.1",
   "permissions": ["storage"],
   "host_permissions": [
     "https://www.faceit.com/*",
-    "https://faceitanalyser.com/*",
-    "https://ru.faceitanalyser.com/*"
+    "https://api.mooncase.one/*"
   ],
   "icons": {
     "16": "logo.png",

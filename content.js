@@ -2,10 +2,8 @@
   const MATCH_ID_RE = /\/cs2\/room\/(1-[0-9a-f-]+)/i;
   const ROOT_ID = "fme-root";
   const PANEL_ID = "fme-panel";
-  const LAUNCHER_ID = "fme-launcher";
-  const STORAGE_POS = "fme:position";
-  const OUTLIER_LOW_DELTA_MULTIPLIER = 0.67;
-  const OUTLIER_HIGH_DELTA_MULTIPLIER = 1.5;
+  const OUTLIER_LOW_MULTIPLIER = 0.8;
+  const OUTLIER_HIGH_MULTIPLIER = 1.2;
 
   const LOGO_URL = chrome.runtime.getURL("logo.png");
 
@@ -13,13 +11,9 @@
     matchId: null,
     loading: false,
     data: null,
-    position: null,
-    minimizedForMatch: null
+    collapsed: false,
+    loadId: 0
   };
-
-  function isMinimized() { 
-    return STATE.minimizedForMatch != null && STATE.minimizedForMatch === currentMatchId();
-  }
 
   function currentMatchId() {
     const m = location.pathname.match(MATCH_ID_RE);
@@ -48,7 +42,7 @@
   }
 
   function winChance(eloA, eloB) {
-    return 1 / (1 + Math.pow(10, (eloB - eloA) / 600));
+    return 1 / (1 + Math.pow(10, (eloB - eloA) / 1000));
   }
 
   function normalizeRoster(faction) {
@@ -73,39 +67,45 @@
     };
   }
 
-  async function loadPlayerStats(teams, { force = false } = {}) {
+  async function loadPlayerStats(teams, { force = false, onUpdate } = {}) {
     const all = [...teams.faction1.players, ...teams.faction2.players];
-    const unique = [...new Map(all.map((p) => [p.nickname, p])).values()];
-    const results = await Promise.all(
-      unique.map(async (p) => {
-        const [highest, season] = await Promise.all([
-          sendMessage({ type: "getHighestElo", nickname: p.nickname, force }),
-          sendMessage({ type: "getSeasonSummary", userId: p.id, force })
-        ]);
-        return [p.nickname, { highest, season }];
-      })
-    );
-    const byNickname = new Map(results);
-    const annotate = (team) =>
-      team.players.map((p) => {
-        const r = byNickname.get(p.nickname) || {};
-        const highest = r.highest || {};
-        const season = r.season || {};
-        return {
-          ...p,
+    const unique = [...new Map(all.map((p) => [p.id, p])).values()];
+    const byUserId = new Map();
+    for (const player of all) {
+      const players = byUserId.get(player.id) || [];
+      players.push(player);
+      byUserId.set(player.id, players);
+    }
+
+    const updatePlayers = (userId, fields) => {
+      for (const player of byUserId.get(userId) || []) Object.assign(player, fields);
+      onUpdate?.();
+    };
+
+    const highestEloRequests = (async () => {
+      for (const player of unique) {
+        const highest = await sendMessage({ type: "getHighestElo", userId: player.id, force });
+        updatePlayers(player.id, {
           highestElo: highest.highestElo ?? null,
+          cached: !!highest.cached,
+          eloError: highest.error || null
+        });
+      }
+    })();
+
+    const seasonRequests = unique.map((player) =>
+      sendMessage({ type: "getSeasonSummary", userId: player.id, force }).then((season) => {
+        updatePlayers(player.id, {
           lastSeasonElo: season.lastSeasonElo ?? null,
           winStreak: season.winStreak ?? null,
-          cached: !!highest.cached,
           seasonCached: !!season.seasonCached,
-          eloError: highest.error || null,
           seasonError: season.seasonError || season.error || null
-        };
-      });
-    return {
-      faction1: { ...teams.faction1, players: annotate(teams.faction1) },
-      faction2: { ...teams.faction2, players: annotate(teams.faction2) }
-    };
+        });
+      })
+    );
+
+    await Promise.all([highestEloRequests, ...seasonRequests]);
+    return teams;
   }
 
   function teamSummary(team) {
@@ -122,37 +122,33 @@
     };
   }
 
-  function teamWinDelta(a, b) {
-    let delta = 0;
-    let n = 0;
+  function teamRatingDifference(a, b) {
+    let difference = 0;
+    let comparableRatings = 0;
     if (a.nCurrent && b.nCurrent) {
-      delta += a.avgElo - b.avgElo;
-      n += 1;
+      difference += a.avgElo - b.avgElo;
+      comparableRatings += 1;
     }
     if (a.nLastSeason && b.nLastSeason) {
-      delta += a.avgLastSeason - b.avgLastSeason;
-      n += 1;
+      difference += a.avgLastSeason - b.avgLastSeason;
+      comparableRatings += 1;
     }
     if (a.nHighest && b.nHighest) {
-      delta += a.avgHighest - b.avgHighest;
-      n += 1;
+      difference += a.avgHighest - b.avgHighest;
+      comparableRatings += 1;
     }
-    return n ? delta : null;
+    return comparableRatings ? difference : null;
   }
 
   function roomOutlierMetrics(teams) {
     const players = [...teams.faction1.players, ...teams.faction2.players];
     const currentElos = players.map((p) => p.elo).filter((v) => typeof v === "number");
-    const lastSeasonDeltas = players
-      .filter((p) => typeof p.elo === "number" && typeof p.lastSeasonElo === "number")
-      .map((p) => p.lastSeasonElo - p.elo);
-    const highestDeltas = players
-      .filter((p) => typeof p.elo === "number" && typeof p.highestElo === "number")
-      .map((p) => p.highestElo - p.elo);
+    const lastSeasonElos = players.map((p) => p.lastSeasonElo).filter((v) => typeof v === "number");
+    const highestElos = players.map((p) => p.highestElo).filter((v) => typeof v === "number");
     return {
       avgCurrent: currentElos.length ? avg(currentElos) : null,
-      avgLastSeasonDelta: lastSeasonDeltas.length ? avg(lastSeasonDeltas) : null,
-      avgHighestDelta: highestDeltas.length ? avg(highestDeltas) : null
+      avgLastSeason: lastSeasonElos.length ? avg(lastSeasonElos) : null,
+      avgHighest: highestElos.length ? avg(highestElos) : null
     };
   }
 
@@ -170,34 +166,26 @@
   }
 
   function formatElo(v) {
-    return v == null ? "—" : Math.round(v).toString();
+    return v == null ? "-" : Math.round(v).toString();
   }
 
-  function formatDelta(v) {
-    if (v == null) return "—";
-    const rounded = Math.round(v);
-    return `${rounded >= 0 ? "+" : ""}${rounded}`;
-  }
-
-  function outlierMeta(metricValue, averageMetric, displayDelta, averageText) {
-    if (typeof metricValue !== "number" || typeof displayDelta !== "number") {
+  function outlierMeta(metricValue, averageMetric, averageText) {
+    if (typeof metricValue !== "number" || typeof averageMetric !== "number" || averageMetric <= 0) {
       return { className: "", title: null };
     }
-    const deltaText = `Δ ${formatDelta(displayDelta)}`;
-    if (typeof averageMetric !== "number" || averageMetric <= 0) return { className: "", title: deltaText };
-    if (metricValue < averageMetric * OUTLIER_LOW_DELTA_MULTIPLIER) {
+    if (metricValue <= averageMetric * OUTLIER_LOW_MULTIPLIER) {
       return {
         className: " fme-outlier-low",
-        title: `${deltaText}, below ${OUTLIER_LOW_DELTA_MULTIPLIER}x ${averageText}`
+        title: `At or below ${OUTLIER_LOW_MULTIPLIER}x ${averageText}`
       };
     }
-    if (metricValue > averageMetric * OUTLIER_HIGH_DELTA_MULTIPLIER) {
+    if (metricValue >= averageMetric * OUTLIER_HIGH_MULTIPLIER) {
       return {
         className: " fme-outlier-high",
-        title: `${deltaText}, above ${OUTLIER_HIGH_DELTA_MULTIPLIER}x ${averageText}`
+        title: `At or above ${OUTLIER_HIGH_MULTIPLIER}x ${averageText}`
       };
     }
-    return { className: "", title: deltaText };
+    return { className: "", title: averageText };
   }
 
   function columnCompareMeta(hasValue, value, opponentHasValue, opponentValue) {
@@ -210,30 +198,8 @@
     return { arrow: "↓", className: "fme-team-stat fme-team-stat-min" };
   }
 
-  function columnTitle(label, teamDelta, opponentDelta) {
-    const parts = [];
-    if (teamDelta != null) parts.push(`${label} Δ ${formatDelta(teamDelta)}`);
-    parts.push(`vs other team Δ ${formatDelta(opponentDelta)}`);
-    return parts.join(", ");
-  }
-
   function renderTeamBlock(label, team, colorClass, opponentSummary = null, roomMetrics = {}) {
     const summary = teamSummary(team);
-    const averageLastSeasonDelta = summary.nCurrent && summary.nLastSeason
-      ? summary.avgLastSeason - summary.avgElo
-      : 0;
-    const averageHighestDelta = summary.nCurrent && summary.nHighest
-      ? summary.avgHighest - summary.avgElo
-      : 0;
-    const currentVsOpponent = summary.nCurrent && opponentSummary?.nCurrent
-      ? summary.avgElo - opponentSummary.avgElo
-      : null;
-    const lastSeasonVsOpponent = summary.nLastSeason && opponentSummary?.nLastSeason
-      ? summary.avgLastSeason - opponentSummary.avgLastSeason
-      : null;
-    const highestVsOpponent = summary.nHighest && opponentSummary?.nHighest
-      ? summary.avgHighest - opponentSummary.avgHighest
-      : null;
     const currentHeader = columnCompareMeta(summary.nCurrent, summary.avgElo, opponentSummary?.nCurrent, opponentSummary?.avgElo);
     const lastSeasonHeader = columnCompareMeta(summary.nLastSeason, summary.avgLastSeason, opponentSummary?.nLastSeason, opponentSummary?.avgLastSeason);
     const highestHeader = columnCompareMeta(summary.nHighest, summary.avgHighest, opponentSummary?.nHighest, opponentSummary?.avgHighest);
@@ -241,22 +207,17 @@
       const currentOutlier = outlierMeta(
         p.elo,
         roomMetrics.avgCurrent,
-        typeof p.elo === "number" && typeof roomMetrics.avgCurrent === "number" ? p.elo - roomMetrics.avgCurrent : null,
-        `room avg ${formatElo(roomMetrics.avgCurrent)}`
+        `lobby avg ${formatElo(roomMetrics.avgCurrent)}`
       );
-      const seasonDelta = typeof p.elo === "number" && typeof p.lastSeasonElo === "number" ? p.lastSeasonElo - p.elo : null;
-      const highestDelta = typeof p.elo === "number" && typeof p.highestElo === "number" ? p.highestElo - p.elo : null;
       const seasonOutlier = outlierMeta(
-        seasonDelta,
-        roomMetrics.avgLastSeasonDelta,
-        seasonDelta,
-        `room Δ ${formatDelta(roomMetrics.avgLastSeasonDelta)}`
+        p.lastSeasonElo,
+        roomMetrics.avgLastSeason,
+        `lobby avg ${formatElo(roomMetrics.avgLastSeason)}`
       );
       const highestOutlier = outlierMeta(
-        highestDelta,
-        roomMetrics.avgHighestDelta,
-        highestDelta,
-        `room Δ ${formatDelta(roomMetrics.avgHighestDelta)}`
+        p.highestElo,
+        roomMetrics.avgHighest,
+        `lobby avg ${formatElo(roomMetrics.avgHighest)}`
       );
       const avatar = p.avatar
         ? el("div", { className: "fme-avatar", style: `background-image:url(${p.avatar})` })
@@ -297,17 +258,17 @@
         el("span", {
           className: currentHeader.className,
           text: `CUR ${currentHeader.arrow} ${formatElo(summary.nCurrent ? summary.avgElo : null)}`,
-          title: columnTitle("Current ELO", null, currentVsOpponent)
+          title: "Current ELO team average"
         }),
         el("span", {
           className: lastSeasonHeader.className,
           text: `LK ${lastSeasonHeader.arrow} ${formatElo(summary.nLastSeason ? summary.avgLastSeason : null)}`,
-          title: columnTitle("Last season ELO", summary.nLastSeason ? averageLastSeasonDelta : null, lastSeasonVsOpponent)
+          title: "Last season ELO team average"
         }),
         el("span", {
           className: highestHeader.className,
           text: `HI ${highestHeader.arrow} ${formatElo(summary.nHighest ? summary.avgHighest : null)}`,
-          title: columnTitle("Highest ELO", summary.nHighest ? averageHighestDelta : null, highestVsOpponent)
+          title: "Highest ELO team average"
         })
       ]),
       ...rows
@@ -315,161 +276,96 @@
   }
 
   function ensureRoot() {
+    const mountTarget = document.querySelector('div[name="info"]');
+    if (!mountTarget) return null;
+
     let root = document.getElementById(ROOT_ID);
     if (!root) {
       root = el("div", { id: ROOT_ID });
-      document.documentElement.appendChild(root);
     }
+    if (root.parentElement !== mountTarget) mountTarget.appendChild(root);
     return root;
   }
 
   function ensurePanel() {
     const root = ensureRoot();
+    if (!root) return null;
     let panel = document.getElementById(PANEL_ID);
     if (!panel) {
       panel = el("div", { id: PANEL_ID, className: "fme-panel" });
       root.appendChild(panel);
-      applyPosition(panel);
-      makeDraggable(panel);
     }
+    panel.classList.toggle("fme-collapsed", STATE.collapsed);
     return panel;
   }
 
-  function ensureLauncher() {
-    const root = ensureRoot();
-    let btn = document.getElementById(LAUNCHER_ID);
-    if (!btn) {
-      btn = el("button", {
-        id: LAUNCHER_ID,
-        className: "fme-launcher",
-        title: "Open FACEIT Elo Diff",
-        html: `<img src="${LOGO_URL}" alt="ELO DIFF">`,
-        onclick: () => setMinimized(false)
-      });
-      root.appendChild(btn);
-    }
-    return btn;
-  }
-
-  function applyPosition(panel) {
-    const pos = STATE.position;
-    if (pos && pos.left != null && pos.top != null) {
-      panel.style.left = pos.left + "px";
-      panel.style.top = pos.top + "px";
-      panel.style.right = "auto";
-    } else {
-      panel.style.right = "16px";
-      panel.style.top = "88px";
-      panel.style.left = "auto";
-    }
-  }
-
-  function clampToViewport(panel) {
-    const rect = panel.getBoundingClientRect();
-    let left = rect.left;
-    let top = rect.top;
-    const maxLeft = Math.max(0, window.innerWidth - rect.width);
-    const maxTop = Math.max(0, window.innerHeight - rect.height);
-    left = Math.max(0, Math.min(left, maxLeft));
-    top = Math.max(0, Math.min(top, maxTop));
-    panel.style.left = left + "px";
-    panel.style.top = top + "px";
-    panel.style.right = "auto";
-  }
-
-  function makeDraggable(panel) {
-    let dragging = false;
-    let startX = 0, startY = 0, originLeft = 0, originTop = 0;
-
-    panel.addEventListener("mousedown", (e) => {
-      const handle = e.target.closest(".fme-drag-handle");
-      if (!handle) return;
-      if (e.target.closest(".fme-btn")) return;
-      if (e.button !== 0) return;
-      dragging = true;
-      const rect = panel.getBoundingClientRect();
-      originLeft = rect.left;
-      originTop = rect.top;
-      startX = e.clientX;
-      startY = e.clientY;
-      panel.classList.add("fme-dragging");
-      document.body.style.userSelect = "none";
-      e.preventDefault();
-    });
-
-    window.addEventListener("mousemove", (e) => {
-      if (!dragging) return;
-      const dx = e.clientX - startX;
-      const dy = e.clientY - startY;
-      let left = originLeft + dx;
-      let top = originTop + dy;
-      const rect = panel.getBoundingClientRect();
-      const maxLeft = Math.max(0, window.innerWidth - rect.width);
-      const maxTop = Math.max(0, window.innerHeight - rect.height);
-      left = Math.max(0, Math.min(left, maxLeft));
-      top = Math.max(0, Math.min(top, maxTop));
-      panel.style.left = left + "px";
-      panel.style.top = top + "px";
-      panel.style.right = "auto";
-    });
-
-    window.addEventListener("mouseup", () => {
-      if (!dragging) return;
-      dragging = false;
-      panel.classList.remove("fme-dragging");
-      document.body.style.userSelect = "";
-      const rect = panel.getBoundingClientRect();
-      STATE.position = { left: Math.round(rect.left), top: Math.round(rect.top) };
-      try { chrome.storage.local.set({ [STORAGE_POS]: STATE.position }); } catch {}
-    });
-
-    window.addEventListener("resize", () => clampToViewport(panel));
-  }
-
-  function renderHeader(panel) {
-    return el("div", { className: "fme-header fme-drag-handle" }, [
+  function renderHeader() {
+    return el("div", { className: "fme-header" }, [
       el("span", { className: "fme-logo", html: `<img src="${LOGO_URL}" alt="">` }),
       el("span", { className: "fme-title", text: "Room ELO Diff" }),
       el("span", { className: "fme-spacer" }),
       el("button", {
-        className: "fme-btn",
-        title: "Refresh",
-        html: "&#x21bb;",
-        onclick: (e) => { e.stopPropagation(); refresh(true); }
+        className: "fme-btn fme-collapse-btn",
+        type: "button",
+        title: STATE.collapsed ? "Expand" : "Collapse",
+        "aria-expanded": String(!STATE.collapsed),
+        html: '<svg class="fme-collapse-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 15 6-6 6 6"></path></svg>',
+        onclick: (e) => {
+          e.stopPropagation();
+          STATE.collapsed = !STATE.collapsed;
+          const panel = e.currentTarget.closest(`#${PANEL_ID}`);
+          panel?.classList.toggle("fme-collapsed", STATE.collapsed);
+          e.currentTarget.title = STATE.collapsed ? "Expand" : "Collapse";
+          e.currentTarget.setAttribute("aria-expanded", String(!STATE.collapsed));
+        }
+      })
+    ]);
+  }
+
+  function renderFooter() {
+    return el("div", { className: "fme-footer" }, [
+      el("span", { text: "Data provided by " }),
+      el("a", {
+        href: "https://faceitanalyser.com/",
+        target: "_blank",
+        rel: "noopener noreferrer",
+        text: "faceitanalyser.com"
       }),
-      el("button", {
-        className: "fme-btn",
-        title: "Minimize",
-        text: "–",
-        onclick: (e) => { e.stopPropagation(); setMinimized(true); }
+      el("span", { text: " · hosted by " }),
+      el("a", {
+        href: "https://mooncase.one/",
+        target: "_blank",
+        rel: "noopener noreferrer",
+        text: "mooncase.one"
       })
     ]);
   }
 
   function renderPanel(teams) {
     const panel = ensurePanel();
+    if (!panel) return;
     panel.innerHTML = "";
 
     const s1 = teamSummary(teams.faction1);
     const s2 = teamSummary(teams.faction2);
     const roomMetrics = roomOutlierMetrics(teams);
-    const diff = teamWinDelta(s1, s2);
-    const chance1 = diff != null ? winChance(diff, 0) : null;
+    const ratingDifference = teamRatingDifference(s1, s2);
+    const chance1 = ratingDifference != null ? winChance(ratingDifference, 0) : null;
 
     const summary = el("div", { className: "fme-summary" }, [
       el("div", { className: "fme-winline" }, [
         el("span", {
           className: "fme-win1",
-          text: chance1 != null ? `${(chance1 * 100).toFixed(0)}%` : "—"
+          text: chance1 != null ? `${(chance1 * 100).toFixed(0)}%` : "-"
         }),
         el("span", {
           className: "fme-winmid",
-          text: diff != null ? `Δ ${formatDelta(diff)}` : "win chance",
-          title: "Win chance uses the sum of CUR, LK, and HI average deltas"
+          text: "win chance",
+          title: "Win chance uses comparable CUR, LK, and HI team averages with a 1000 Elo scale"
         }),
         el("span", {
           className: "fme-win2",
-          text: chance1 != null ? `${((1 - chance1) * 100).toFixed(0)}%` : "—"
+          text: chance1 != null ? `${((1 - chance1) * 100).toFixed(0)}%` : "-"
         })
       ]),
       el("div", { className: "fme-winbar" }, [
@@ -481,42 +377,36 @@
     ]);
 
     panel.append(
-      renderHeader(panel),
+      renderHeader(),
       summary,
       renderTeamBlock("Team 1", teams.faction1, "fme-team1", s2, roomMetrics),
-      renderTeamBlock("Team 2", teams.faction2, "fme-team2", s1, roomMetrics)
+      renderTeamBlock("Team 2", teams.faction2, "fme-team2", s1, roomMetrics),
+      renderFooter()
     );
-
-    clampToViewport(panel);
   }
 
   function renderStatus(message, kind = "loading") {
     const panel = ensurePanel();
+    if (!panel) return;
     panel.innerHTML = "";
     panel.append(
-      renderHeader(panel),
-      el("div", { className: `fme-${kind}`, text: message })
+      renderHeader(),
+      el("div", { className: `fme-${kind}`, text: message }),
+      renderFooter()
     );
-  }
-
-  function setMinimized(minimized) {
-    STATE.minimizedForMatch = minimized ? currentMatchId() : null;
-    applyVisibility();
   }
 
   function applyVisibility() {
     const root = ensureRoot();
-    const panel = ensurePanel();
-    const launcher = ensureLauncher();
+    if (!root) return false;
+    ensurePanel();
     const onMatchPage = !!currentMatchId();
     if (!onMatchPage) {
       root.classList.add("fme-hidden");
-      return;
+      return true;
     }
     root.classList.remove("fme-hidden");
-    const min = isMinimized();
-    panel.style.display = min ? "none" : "";
-    launcher.style.display = min ? "" : "none";
+    return true;
   }
 
   async function refresh(force = false) {
@@ -527,52 +417,54 @@
       applyVisibility();
       return;
     }
-    applyVisibility();
-    if (STATE.loading) return;
+    if (!applyVisibility()) return;
+    if (STATE.loading && STATE.matchId === matchId) return;
+    const loadId = ++STATE.loadId;
     STATE.loading = true;
     STATE.matchId = matchId;
+    STATE.data = null;
     try {
       renderStatus("Fetching match…", "loading");
       const teams = await loadTeams(matchId);
-      renderStatus("Fetching player stats…", "loading");
-      const annotated = await loadPlayerStats(teams, { force });
-      STATE.data = annotated;
-      renderPanel(annotated);
-    } catch (err) {
-      renderStatus(`Error: ${err?.message || err}`, "error");
-    } finally {
+      if (currentMatchId() !== matchId || STATE.loadId !== loadId) return;
+      STATE.data = teams;
       STATE.loading = false;
+      renderPanel(teams);
+      await loadPlayerStats(teams, {
+        force,
+        onUpdate: () => {
+          if (currentMatchId() === matchId && STATE.loadId === loadId) renderPanel(teams);
+        }
+      });
+    } catch (err) {
+      if (currentMatchId() === matchId && STATE.loadId === loadId) {
+        renderStatus(`Error: ${err?.message || err}`, "error");
+      }
+    } finally {
+      if (STATE.loadId === loadId) STATE.loading = false;
     }
   }
 
-  async function loadPrefs() {
-    try {
-      const data = await chrome.storage.local.get([STORAGE_POS]);
-      STATE.position = data[STORAGE_POS] || null;
-    } catch {}
-  }
-
-  async function bootstrap() {
-    await loadPrefs();
-    ensureRoot();
-    ensurePanel();
-    ensureLauncher();
-    applyVisibility();
+  function bootstrap() {
     watchUrlChanges();
   }
 
   function watchUrlChanges() {
-    let lastMatchId = currentMatchId();
-    if (lastMatchId) refresh();
+    let lastMatchId = null;
 
     const tick = () => {
       const now = currentMatchId();
+      const mounted = applyVisibility();
       if (now !== lastMatchId) {
         lastMatchId = now;
-        refresh();
-      } else {
-        applyVisibility();
+        if (now && mounted) refresh();
+        return;
       }
+
+      if (!now || !mounted || STATE.loading) return;
+      const panel = document.getElementById(PANEL_ID);
+      if (STATE.matchId !== now || !STATE.data) refresh();
+      else if (panel && !panel.childElementCount) renderPanel(STATE.data);
     };
 
     const wrap = (name) => {
@@ -586,6 +478,7 @@
     wrap("pushState");
     wrap("replaceState");
     window.addEventListener("popstate", () => setTimeout(tick, 50));
+    tick();
     setInterval(tick, 1500);
   }
 
