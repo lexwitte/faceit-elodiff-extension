@@ -4,21 +4,21 @@ const HIGHEST_ELO_API_BASE_URL = "https://api.mooncase.one/faceit/stats";
 const cacheKey = (userId) => `elo:${userId}`;
 const seasonCacheKey = (userId) => `season:${userId}:cs2`;
 
+function validElo(v) {
+  return typeof v === "number" && Number.isFinite(v) && v > 0;
+}
+
 async function readCache(userId) {
   const key = cacheKey(userId);
   const data = await chrome.storage.local.get(key);
   const entry = data[key];
   if (!entry) return null;
-  if (
-    typeof entry.highestElo !== "number" ||
-    !Number.isFinite(entry.highestElo) ||
-    Date.now() - entry.ts > CACHE_TTL_MS
-  ) return null;
+  if (!validElo(entry.highestElo) || Date.now() - entry.ts > CACHE_TTL_MS) return null;
   return entry;
 }
 
 async function writeCache(userId, highestElo) {
-  if (typeof highestElo !== "number" || !Number.isFinite(highestElo)) return;
+  if (!validElo(highestElo)) return;
   await chrome.storage.local.set({
     [cacheKey(userId)]: { highestElo, ts: Date.now() }
   });
@@ -29,9 +29,10 @@ async function readSeasonCache(userId) {
   const data = await chrome.storage.local.get(key);
   const entry = data[key];
   if (!entry) return null;
-  const ttl = entry.lastSeasonElo == null && entry.winStreak == null ? NEG_CACHE_TTL_MS : CACHE_TTL_MS;
+  const lastSeasonElo = validElo(entry.lastSeasonElo) ? entry.lastSeasonElo : null;
+  const ttl = lastSeasonElo == null && entry.winStreak == null ? NEG_CACHE_TTL_MS : CACHE_TTL_MS;
   if (Date.now() - entry.ts > ttl) return null;
-  return entry;
+  return { ...entry, lastSeasonElo };
 }
 
 async function writeSeasonCache(userId, summary) {
@@ -55,7 +56,7 @@ async function fetchHighestElo(userId) {
   const payload = await res.json();
   if (payload?.success !== true) throw new Error("Highest ELO API request failed");
   const highestElo = payload?.data?.highestElo;
-  if (typeof highestElo !== "number" || !Number.isFinite(highestElo)) {
+  if (!validElo(highestElo)) {
     throw new Error("Highest ELO API returned invalid data");
   }
   return highestElo;
@@ -88,7 +89,7 @@ async function fetchSeasonSummary(userId) {
   const lastSeasonValue = data?.last_season?.value;
   const currentWinStreak = data?.current_season?.win_streak;
   return {
-    lastSeasonElo: typeof lastSeasonValue === "number" ? lastSeasonValue : null,
+    lastSeasonElo: validElo(lastSeasonValue) ? lastSeasonValue : null,
     winStreak: typeof currentWinStreak === "number" ? currentWinStreak : null
   };
 }

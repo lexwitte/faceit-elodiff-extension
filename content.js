@@ -41,6 +41,14 @@
     return arr.reduce((a, b) => a + b, 0) / arr.length;
   }
 
+  function validElo(v) {
+    return typeof v === "number" && Number.isFinite(v) && v > 0;
+  }
+
+  function sanitizeElo(v) {
+    return validElo(v) ? v : null;
+  }
+
   function winChance(eloA, eloB) {
     return 1 / (1 + Math.pow(10, (eloB - eloA) / 1000));
   }
@@ -51,7 +59,7 @@
       id: p.id,
       nickname: p.nickname,
       steamId64: p.gameId,
-      elo: typeof p.elo === "number" ? p.elo : null,
+      elo: sanitizeElo(p.elo),
       avatar: p.avatar || ""
     }));
     return { name: faction.name || "", players };
@@ -86,7 +94,7 @@
       for (const player of unique) {
         const highest = await sendMessage({ type: "getHighestElo", userId: player.id, force });
         updatePlayers(player.id, {
-          highestElo: highest.highestElo ?? null,
+          highestElo: sanitizeElo(highest.highestElo),
           cached: !!highest.cached,
           eloError: highest.error || null
         });
@@ -96,7 +104,7 @@
     const seasonRequests = unique.map((player) =>
       sendMessage({ type: "getSeasonSummary", userId: player.id, force }).then((season) => {
         updatePlayers(player.id, {
-          lastSeasonElo: season.lastSeasonElo ?? null,
+          lastSeasonElo: sanitizeElo(season.lastSeasonElo),
           winStreak: season.winStreak ?? null,
           seasonCached: !!season.seasonCached,
           seasonError: season.seasonError || season.error || null
@@ -109,9 +117,9 @@
   }
 
   function teamSummary(team) {
-    const elos = team.players.map((p) => p.elo).filter((v) => typeof v === "number");
-    const lastSeasonElos = team.players.map((p) => p.lastSeasonElo).filter((v) => typeof v === "number");
-    const highs = team.players.map((p) => p.highestElo).filter((v) => typeof v === "number");
+    const elos = team.players.map((p) => p.elo).filter(validElo);
+    const lastSeasonElos = team.players.map((p) => p.lastSeasonElo).filter(validElo);
+    const highs = team.players.map((p) => p.highestElo).filter(validElo);
     return {
       avgElo: avg(elos),
       avgLastSeason: avg(lastSeasonElos),
@@ -142,9 +150,9 @@
 
   function roomOutlierMetrics(teams) {
     const players = [...teams.faction1.players, ...teams.faction2.players];
-    const currentElos = players.map((p) => p.elo).filter((v) => typeof v === "number");
-    const lastSeasonElos = players.map((p) => p.lastSeasonElo).filter((v) => typeof v === "number");
-    const highestElos = players.map((p) => p.highestElo).filter((v) => typeof v === "number");
+    const currentElos = players.map((p) => p.elo).filter(validElo);
+    const lastSeasonElos = players.map((p) => p.lastSeasonElo).filter(validElo);
+    const highestElos = players.map((p) => p.highestElo).filter(validElo);
     return {
       avgCurrent: currentElos.length ? avg(currentElos) : null,
       avgLastSeason: lastSeasonElos.length ? avg(lastSeasonElos) : null,
@@ -170,7 +178,7 @@
   }
 
   function outlierMeta(metricValue, averageMetric, averageText) {
-    if (typeof metricValue !== "number" || typeof averageMetric !== "number" || averageMetric <= 0) {
+    if (!validElo(metricValue) || !validElo(averageMetric)) {
       return { className: "", title: null };
     }
     if (metricValue <= averageMetric * OUTLIER_LOW_MULTIPLIER) {
@@ -233,18 +241,18 @@
           ])
         ]),
         el("span", {
-          className: "fme-stat fme-elo" + (p.elo == null ? "" : currentOutlier.className),
-          text: formatElo(p.elo),
+          className: "fme-stat fme-elo" + (validElo(p.elo) ? currentOutlier.className : ""),
+          text: formatElo(validElo(p.elo) ? p.elo : null),
           title: currentOutlier.title
         }),
         el("span", {
-          className: "fme-stat fme-season" + (p.lastSeasonElo == null ? " fme-missing" : seasonOutlier.className),
-          text: formatElo(p.lastSeasonElo),
+          className: "fme-stat fme-season" + (validElo(p.lastSeasonElo) ? seasonOutlier.className : " fme-missing"),
+          text: formatElo(validElo(p.lastSeasonElo) ? p.lastSeasonElo : null),
           title: seasonOutlier.title
         }),
         el("span", {
-          className: "fme-stat fme-highest" + (p.highestElo == null ? " fme-missing" : highestOutlier.className),
-          text: formatElo(p.highestElo),
+          className: "fme-stat fme-highest" + (validElo(p.highestElo) ? highestOutlier.className : " fme-missing"),
+          text: formatElo(validElo(p.highestElo) ? p.highestElo : null),
           title: highestOutlier.title
         })
       ]);
