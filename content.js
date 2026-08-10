@@ -4,12 +4,14 @@
   const PANEL_ID = "fme-panel";
   const OUTLIER_LOW_MULTIPLIER = 0.8;
   const OUTLIER_HIGH_MULTIPLIER = 1.2;
+  const MAX_STATS_ATTEMPTS = 3;
 
   const LOGO_URL = chrome.runtime.getURL("logo.png");
 
   const STATE = {
     matchId: null,
     loading: false,
+    statsLoading: false,
     data: null,
     collapsed: false,
     loadId: 0
@@ -75,45 +77,70 @@
     };
   }
 
-  async function loadPlayerStats(teams, { force = false, onUpdate } = {}) {
-    const all = [...teams.faction1.players, ...teams.faction2.players];
-    const unique = [...new Map(all.map((p) => [p.id, p])).values()];
+  function allPlayers(teams) {
+    return [...teams.faction1.players, ...teams.faction2.players];
+  }
+
+  // A player is done once the worker answered, even if the API had no seasons for
+  // them. Only an unanswered message (dead service worker, torn-down channel) is
+  // worth another attempt.
+  function playersAwaitingStats(teams) {
+    return allPlayers(teams).filter(
+      (p) => !p.statsLoaded && (p.statsAttempts || 0) < MAX_STATS_ATTEMPTS
+    );
+  }
+
+  async function loadPlayerStats(teams, { force = false, onUpdate, players } = {}) {
     const byUserId = new Map();
-    for (const player of all) {
-      const players = byUserId.get(player.id) || [];
-      players.push(player);
-      byUserId.set(player.id, players);
+    for (const player of allPlayers(teams)) {
+      const group = byUserId.get(player.id) || [];
+      group.push(player);
+      byUserId.set(player.id, group);
     }
 
-    const updatePlayers = (userId, fields) => {
+    const assign = (userId, fields) => {
       for (const player of byUserId.get(userId) || []) Object.assign(player, fields);
-      onUpdate?.();
     };
 
-    const highestEloRequests = (async () => {
-      for (const player of unique) {
-        const highest = await sendMessage({ type: "getHighestElo", userId: player.id, force });
-        updatePlayers(player.id, {
-          highestElo: sanitizeElo(highest.highestElo),
-          cached: !!highest.cached,
-          eloError: highest.error || null
-        });
-      }
-    })();
+    const targets = players || allPlayers(teams);
+    const unique = [...new Map(targets.map((p) => [p.id, p])).values()];
 
-    const seasonRequests = unique.map((player) =>
-      sendMessage({ type: "getSeasonSummary", userId: player.id, force }).then((season) => {
-        updatePlayers(player.id, {
-          lastSeasonElo: sanitizeElo(season.lastSeasonElo),
-          winStreak: season.winStreak ?? null,
-          seasonCached: !!season.seasonCached,
-          seasonError: season.seasonError || season.error || null
+    await Promise.all(
+      unique.map((player) => {
+        assign(player.id, { statsAttempts: (player.statsAttempts || 0) + 1 });
+        return sendMessage({ type: "getPlayerStats", userId: player.id, force }).then((stats) => {
+          if (!stats.ok || stats.error) {
+            console.warn("[fme] season stats failed for", player.nickname, stats.error || stats);
+          }
+          if (stats.ok) {
+            assign(player.id, {
+              statsLoaded: true,
+              lastSeasonElo: sanitizeElo(stats.lastSeasonElo),
+              highestElo: sanitizeElo(stats.highestElo)
+            });
+          }
+          onUpdate?.();
         });
       })
     );
-
-    await Promise.all([highestEloRequests, ...seasonRequests]);
     return teams;
+  }
+
+  // Repaints the widget as each player's seasons land, so rows fill in one by one
+  // instead of waiting for the whole (rate-limited) batch.
+  function loadStats(teams, { force = false, players } = {}) {
+    const matchId = STATE.matchId;
+    const loadId = STATE.loadId;
+    STATE.statsLoading = true;
+    return loadPlayerStats(teams, {
+      force,
+      players,
+      onUpdate: () => {
+        if (currentMatchId() === matchId && STATE.loadId === loadId) renderPanel(teams);
+      }
+    }).finally(() => {
+      if (STATE.loadId === loadId) STATE.statsLoading = false;
+    });
   }
 
   function teamSummary(team) {
@@ -234,10 +261,17 @@
         el("div", { className: "fme-player-name" }, [
           avatar,
           el("span", { className: "fme-player-text" }, [
-            el("span", { className: "fme-nick", text: p.nickname, title: p.nickname }),
-            p.winStreak != null
-              ? el("span", { className: "fme-streak", text: `${p.winStreak}W`, title: "Current season win streak" })
-              : null
+            p.id
+              ? el("a", {
+                  className: "fme-nick",
+                  href: `https://www.faceit.com/users/${p.id}`,
+                  target: "_blank",
+                  rel: "noopener noreferrer",
+                  text: p.nickname,
+                  title: p.nickname,
+                  onclick: (e) => e.stopPropagation()
+                })
+              : el("span", { className: "fme-nick", text: p.nickname, title: p.nickname })
           ])
         ]),
         el("span", {
@@ -313,6 +347,16 @@
       el("span", { className: "fme-title", text: "Room ELO Diff" }),
       el("span", { className: "fme-spacer" }),
       el("button", {
+        className: "fme-btn fme-refresh-btn",
+        type: "button",
+        title: "Refresh (ignores cache)",
+        html: '<svg class="fme-btn-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7"></path><path d="M20 4v7h-7"></path></svg>',
+        onclick: (e) => {
+          e.stopPropagation();
+          refresh(true);
+        }
+      }),
+      el("button", {
         className: "fme-btn fme-collapse-btn",
         type: "button",
         title: STATE.collapsed ? "Expand" : "Collapse",
@@ -332,18 +376,11 @@
 
   function renderFooter() {
     return el("div", { className: "fme-footer" }, [
-      el("span", { text: "Data provided by " }),
-      el("a", {
-        href: "https://faceitanalyser.com/",
-        target: "_blank",
-        rel: "noopener noreferrer",
-        text: "faceitanalyser.com"
-      }),
-      el("span", { text: " · hosted by " }),
+      el("span", { text: "Brought by " }),
       el("a", {
         href: "https://mooncase.one/",
         target: "_blank",
-        rel: "noopener noreferrer",
+        rel: "noopener",
         text: "mooncase.one"
       })
     ]);
@@ -438,12 +475,7 @@
       STATE.data = teams;
       STATE.loading = false;
       renderPanel(teams);
-      await loadPlayerStats(teams, {
-        force,
-        onUpdate: () => {
-          if (currentMatchId() === matchId && STATE.loadId === loadId) renderPanel(teams);
-        }
-      });
+      await loadStats(teams, { force });
     } catch (err) {
       if (currentMatchId() === matchId && STATE.loadId === loadId) {
         renderStatus(`Error: ${err?.message || err}`, "error");
@@ -471,8 +503,13 @@
 
       if (!now || !mounted || STATE.loading) return;
       const panel = document.getElementById(PANEL_ID);
-      if (STATE.matchId !== now || !STATE.data) refresh();
-      else if (panel && !panel.childElementCount) renderPanel(STATE.data);
+      if (STATE.matchId !== now || !STATE.data) return refresh();
+      if (panel && !panel.childElementCount) renderPanel(STATE.data);
+      if (STATE.statsLoading) return;
+      // The service worker can be torn down while the throttled queue waits out a
+      // rate limit, leaving those replies unanswered. Pick the stragglers back up.
+      const pending = playersAwaitingStats(STATE.data);
+      if (pending.length) loadStats(STATE.data, { players: pending });
     };
 
     const wrap = (name) => {

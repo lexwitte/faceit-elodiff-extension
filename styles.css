@@ -91,7 +91,8 @@
   border-color: var(--fme-border-2);
 }
 
-#fme-panel .fme-collapse-icon {
+#fme-panel .fme-collapse-icon,
+#fme-panel .fme-btn-icon {
   width: 14px;
   height: 14px;
   fill: none;
@@ -254,16 +255,14 @@
   font-weight: 500;
 }
 
-#fme-panel .fme-streak {
-  flex: 0 0 auto;
-  color: var(--fme-good);
-  border: 1px solid var(--fme-border);
-  border-radius: 4px;
-  padding: 0 3px;
-  font-size: 9px;
-  line-height: 14px;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
+#fme-panel a.fme-nick {
+  text-decoration: none;
+  cursor: pointer;
+}
+
+#fme-panel a.fme-nick:hover {
+  color: var(--fme-orange-2);
+  text-decoration: underline;
 }
 
 #fme-panel .fme-stat {
