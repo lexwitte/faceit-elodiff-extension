@@ -43,8 +43,9 @@ function summarizeSeasons(seasons) {
   // seasonId is a uuid, so recency comes from the response order: oldest to newest.
   const newestFirst = seasons.filter((s) => s && typeof s === "object").reverse();
   const highest = newestFirst.map((s) => s.elo_highest).filter(validElo);
+
   return {
-    lastSeasonElo: newestFirst.map((s) => s.elo_end).find(validElo) ?? null,
+    lastSeasonElo: newestFirst.slice(1).map((s) => s.elo_end).find(validElo) ?? null,
     highestElo: highest.length ? Math.max(...highest) : null
   };
 }
