@@ -318,3 +318,66 @@
 }
 
 #fme-panel .fme-footer a:hover { text-decoration: underline; }
+
+/* Matchmaking server tiles: ping badge and "less preferred" toggle, overlaid on the flag */
+[role="button"]:has(> .fme-less-preferred) { position: relative; }
+
+.fme-ping,
+.fme-less-preferred {
+  position: absolute;
+  top: 6px;
+  z-index: 2;
+  box-sizing: border-box;
+  height: 16px;
+  border-radius: 8px;
+  background: rgba(18, 18, 18, 0.8);
+  color: #e8eaed;
+  font: 600 10px/16px "Play", "Inter", "Segoe UI", Roboto, Arial, sans-serif;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.fme-ping {
+  right: 6px;
+  padding: 0 6px;
+  pointer-events: none;
+}
+
+.fme-ping.fme-active { color: #ff7a2e; }
+
+/* Quiet until the tile is hovered, so ten tiles don't shout at once. */
+.fme-less-preferred {
+  left: 6px;
+  width: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s, background-color 0.12s;
+}
+
+[role="button"]:hover > .fme-less-preferred,
+.fme-less-preferred:focus-within,
+.fme-less-preferred.fme-active { opacity: 1; }
+
+.fme-less-preferred:hover { background: rgba(18, 18, 18, 0.95); color: #ff7a2e; }
+
+.fme-less-preferred.fme-active {
+  background: #ff5500;
+  color: #fff;
+}
+
+.fme-less-preferred input {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.fme-less-preferred-icon { pointer-events: none; }
+
+[role="button"]:has(> .fme-less-preferred.fme-active) [class*="SelectorImage"] {
+  filter: grayscale(0.8) brightness(0.6);
+}

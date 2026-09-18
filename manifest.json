@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "FACEIT Elo Diff",
   "description": "Compare current, last-season, and peak ELO for every FACEIT CS2 match room player, with win odds.",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "permissions": ["storage"],
   "host_permissions": [
     "https://www.faceit.com/*"
@@ -14,6 +14,17 @@
     "128": "logo.png"
   },
   "content_scripts": [
+    {
+      "matches": ["https://www.faceit.com/*"],
+      "js": ["ping-main.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://www.faceit.com/*"],
+      "js": ["ping-bridge.js"],
+      "run_at": "document_start"
+    },
     {
       "matches": ["https://www.faceit.com/*"],
       "js": ["content.js"],
