@@ -8,6 +8,11 @@ const FALLBACK_COOLDOWN_MS = 5 * 1000;
 const MAX_COOLDOWN_MS = 60 * 1000;
 const MAX_ATTEMPTS = 3;
 const RETRY_STATUSES = new Set([429, 503]);
+// `Date` has one-second resolution, so younger cache hits can't be told apart.
+const CACHE_HIT_MIN_AGE_MS = 2000;
+// `cf-cache-status` values for responses Cloudflare served without asking the
+// origin. REVALIDATED is left out: it sent a conditional request upstream.
+const CF_CACHE_HITS = new Set(["HIT", "STALE", "UPDATING"]);
 
 function validElo(v) {
   return typeof v === "number" && Number.isFinite(v) && v > 0;
@@ -78,6 +83,25 @@ function cooldownMs(res) {
   return Math.min(Math.max(reset, 0) * 1000, MAX_COOLDOWN_MS);
 }
 
+// The smallest gap seen between the local clock and a response's `Date` header.
+// Responses fresh off the network sit at this baseline (clock skew plus latency);
+// ones replayed from the HTTP cache keep their original `Date`, so their age adds
+// on top of it.
+let minDateLagMs = Infinity;
+
+function servedFromBrowserCache(res) {
+  const date = Date.parse(res.headers.get("date") ?? "");
+  if (!Number.isFinite(date)) return false;
+  const lag = Date.now() - date;
+  minDateLagMs = Math.min(minDateLagMs, lag);
+  return lag - minDateLagMs > CACHE_HIT_MIN_AGE_MS;
+}
+
+function servedFromCloudflareCache(res) {
+  const status = res.headers.get("cf-cache-status");
+  return status != null && CF_CACHE_HITS.has(status.trim().toUpperCase());
+}
+
 async function throttledFetch(url, init) {
   return enqueue(async () => {
     for (let attempt = 1; ; attempt++) {
@@ -85,6 +109,9 @@ async function throttledFetch(url, init) {
       if (wait > 0) await sleep(wait);
 
       const res = await fetch(url, init);
+      // A cache hit never reached the rate-limited API: it spent no budget, and its
+      // rate-limit headers are as stale as the entry, so it must not move the schedule.
+      if (servedFromBrowserCache(res) || servedFromCloudflareCache(res)) return res;
       const retryable = RETRY_STATUSES.has(res.status);
       // `ratelimit-remaining` is the request budget left in the window; once it is
       // gone, hold every queued request until the window resets.
