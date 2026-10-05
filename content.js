@@ -5,6 +5,7 @@
   const OUTLIER_LOW_MULTIPLIER = 0.8;
   const OUTLIER_HIGH_MULTIPLIER = 1.2;
   const MAX_STATS_ATTEMPTS = 3;
+  const MAX_RATE_LIMIT_RETRIES = 5;
 
   const LOGO_URL = chrome.runtime.getURL("logo.png");
 
@@ -14,7 +15,9 @@
     statsLoading: false,
     data: null,
     collapsed: false,
-    loadId: 0
+    loadId: 0,
+    // When a rate-limited match lookup may be tried again.
+    matchRetryAt: 0
   };
 
   function currentMatchId() {
@@ -69,7 +72,11 @@
 
   async function loadTeams(matchId) {
     const res = await sendMessage({ type: "getMatch", matchId });
-    if (!res.ok) throw new Error(res.error || "match fetch failed");
+    if (!res.ok) {
+      const err = new Error(res.error || "match fetch failed");
+      err.retryAt = res.retryAt;
+      throw err;
+    }
     const teams = res.data?.payload?.teams || {};
     return {
       faction1: normalizeRoster(teams.faction1),
@@ -82,11 +89,16 @@
   }
 
   // A player is done once the worker answered, even if the API had no seasons for
-  // them. Only an unanswered message (dead service worker, torn-down channel) is
-  // worth another attempt.
+  // them. Only an unanswered message (dead service worker, torn-down channel) or a
+  // rate-limited request is worth another attempt; the latter waits for `retryAt`.
   function playersAwaitingStats(teams) {
+    const now = Date.now();
     return allPlayers(teams).filter(
-      (p) => !p.statsLoaded && (p.statsAttempts || 0) < MAX_STATS_ATTEMPTS
+      (p) =>
+        !p.statsLoaded &&
+        (p.statsAttempts || 0) < MAX_STATS_ATTEMPTS &&
+        (p.rateLimitRetries || 0) <= MAX_RATE_LIMIT_RETRIES &&
+        !(p.retryAt > now)
     );
   }
 
@@ -112,7 +124,14 @@
           if (!stats.ok || stats.error) {
             console.warn("[fme] season stats failed for", player.nickname, stats.error || stats);
           }
-          if (stats.ok) {
+          if (stats.ok && Number.isFinite(stats.retryAt)) {
+            // The server asked us to come back later; that isn't a failed attempt.
+            assign(player.id, {
+              statsAttempts: player.statsAttempts - 1,
+              rateLimitRetries: (player.rateLimitRetries || 0) + 1,
+              retryAt: stats.retryAt
+            });
+          } else if (stats.ok) {
             assign(player.id, {
               statsLoaded: true,
               lastSeasonElo: sanitizeElo(stats.lastSeasonElo),
@@ -486,7 +505,13 @@
       await loadStats(teams, { force });
     } catch (err) {
       if (currentMatchId() === matchId && STATE.loadId === loadId) {
-        renderStatus(`Error: ${err?.message || err}`, "error");
+        if (Number.isFinite(err?.retryAt)) {
+          STATE.matchRetryAt = err.retryAt;
+          const seconds = Math.max(Math.ceil((err.retryAt - Date.now()) / 1000), 1);
+          renderStatus(`Rate limited, retrying in ${seconds}s…`, "loading");
+        } else {
+          renderStatus(`Error: ${err?.message || err}`, "error");
+        }
       }
     } finally {
       if (STATE.loadId === loadId) STATE.loading = false;
@@ -517,7 +542,10 @@
         if (panel && !panel.childElementCount) renderStatus("Fetching match…", "loading");
         return;
       }
-      if (STATE.matchId !== now || !STATE.data) return refresh();
+      if (STATE.matchId !== now || !STATE.data) {
+        if (STATE.matchId === now && STATE.matchRetryAt > Date.now()) return;
+        return refresh();
+      }
       if (panel && !panel.childElementCount) renderPanel(STATE.data);
       if (STATE.statsLoading) return;
       // The service worker can be torn down while the throttled queue waits out a

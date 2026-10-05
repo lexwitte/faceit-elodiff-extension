@@ -57,15 +57,71 @@ function summarizeSeasons(seasons) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// One request in flight at a time, so a full match room never bursts ten of them.
-let queueTail = Promise.resolve();
-let nextRequestAt = 0;
+// One request in flight per route, so a full match room never bursts ten of them
+// and a match lookup never waits behind a room's worth of stats. Waits belong to
+// FACEIT's rate limits, which `x-faceit-ratelimit-name` names on every response;
+// routes that turn out to share a limit share its wait. Until a route's limit is
+// known, it is tracked under the route's own name.
+const queueTails = new Map(); // route -> tail of its request queue
+const limitOfRoute = new Map(); // route -> rate limit name
+const nextRequestAt = new Map(); // rate limit name -> earliest next request
 
-function enqueue(task) {
-  const run = queueTail.then(task, task);
-  queueTail = run.then(
-    () => {},
-    () => {}
+// Chrome may stop the worker mid-cooldown; a fresh one must not send early.
+const THROTTLE_KEY = "throttle";
+const restoredThrottle = chrome.storage.session
+  .get(THROTTLE_KEY)
+  .then((data) => {
+    const saved = data[THROTTLE_KEY];
+    for (const [route, limit] of Object.entries(saved?.routes ?? {})) {
+      if (!limitOfRoute.has(route) && typeof limit === "string") limitOfRoute.set(route, limit);
+    }
+    for (const [limit, at] of Object.entries(saved?.schedules ?? {})) {
+      if (Number.isFinite(at)) nextRequestAt.set(limit, Math.max(nextRequestAt.get(limit) ?? 0, at));
+    }
+  })
+  .catch((err) => console.error(err));
+
+function persistThrottle() {
+  chrome.storage.session
+    .set({
+      [THROTTLE_KEY]: {
+        routes: Object.fromEntries(limitOfRoute),
+        schedules: Object.fromEntries(nextRequestAt)
+      }
+    })
+    .catch((err) => console.error(err));
+}
+
+const limitFor = (route) => limitOfRoute.get(route) ?? route;
+const scheduleFor = (route) => nextRequestAt.get(limitFor(route)) ?? 0;
+
+// Returns whether the route's limit changed. The wait tracked under the old name
+// carries over, so learning the name never shortens it.
+function learnLimit(route, res) {
+  const name = res.headers.get("x-faceit-ratelimit-name")?.trim();
+  if (!name || limitOfRoute.get(route) === name) return false;
+  nextRequestAt.set(name, Math.max(nextRequestAt.get(name) ?? 0, scheduleFor(route)));
+  limitOfRoute.set(route, name);
+  return true;
+}
+
+// Never moves a limit's next slot earlier: another route sharing it may have just
+// been told to back off.
+function scheduleNextRequest(route, delay, learned) {
+  const limit = limitFor(route);
+  nextRequestAt.set(limit, Math.max(nextRequestAt.get(limit) ?? 0, Date.now() + delay));
+  // Only waits longer than the normal gap are worth outliving the worker.
+  if (learned || delay > MIN_REQUEST_GAP_MS) persistThrottle();
+}
+
+function enqueue(route, task) {
+  const run = (queueTails.get(route) ?? Promise.resolve()).then(task, task);
+  queueTails.set(
+    route,
+    run.then(
+      () => {},
+      () => {}
+    )
   );
   return run;
 }
@@ -76,8 +132,23 @@ function headerNumber(res, name) {
   return Number.isFinite(value) ? value : null;
 }
 
-// `ratelimit-reset` is the seconds left in the current window.
-function cooldownMs(res) {
+// `Retry-After` is either delay-seconds or an HTTP date.
+function retryAfterMs(res) {
+  const raw = res.headers.get("retry-after")?.trim();
+  if (!raw) return null;
+  if (/^\d+$/.test(raw)) return Number(raw) * 1000;
+  const until = Date.parse(raw);
+  if (!Number.isFinite(until)) return null;
+  // Measured against the response's own `Date`, so local clock skew cancels out.
+  const sent = Date.parse(res.headers.get("date") ?? "");
+  return Math.max(until - (Number.isFinite(sent) ? sent : Date.now()), 0);
+}
+
+// `ratelimit-reset` is the seconds left in the current window. An explicit
+// `Retry-After` on a 429/503 wins and is never shortened by the cap.
+function cooldownMs(res, retryable) {
+  const retryAfter = retryable ? retryAfterMs(res) : null;
+  if (retryAfter != null) return retryAfter;
   const reset = headerNumber(res, "ratelimit-reset");
   if (reset == null) return FALLBACK_COOLDOWN_MS;
   return Math.min(Math.max(reset, 0) * 1000, MAX_COOLDOWN_MS);
@@ -102,36 +173,49 @@ function servedFromCloudflareCache(res) {
   return status != null && CF_CACHE_HITS.has(status.trim().toUpperCase());
 }
 
-async function throttledFetch(url, init) {
-  return enqueue(async () => {
+async function throttledFetch(route, url, init) {
+  return enqueue(route, async () => {
+    await restoredThrottle;
     for (let attempt = 1; ; attempt++) {
-      const wait = nextRequestAt - Date.now();
-      if (wait > 0) await sleep(wait);
+      // A route sharing this limit can push the slot back while we sleep.
+      for (let wait; (wait = scheduleFor(route) - Date.now()) > 0; ) await sleep(wait);
 
       const res = await fetch(url, init);
       // A cache hit never reached the rate-limited API: it spent no budget, and its
       // rate-limit headers are as stale as the entry, so it must not move the schedule.
       if (servedFromBrowserCache(res) || servedFromCloudflareCache(res)) return res;
+      const learned = learnLimit(route, res);
       const retryable = RETRY_STATUSES.has(res.status);
       // `ratelimit-remaining` is the request budget left in the window; once it is
       // gone, hold every queued request until the window resets.
       const remaining = headerNumber(res, "ratelimit-remaining") ?? Infinity;
       const outOfBudget = retryable || remaining <= 0;
-      nextRequestAt = Date.now() + (outOfBudget ? cooldownMs(res) : MIN_REQUEST_GAP_MS);
+      const delay = outOfBudget ? cooldownMs(res, retryable) : MIN_REQUEST_GAP_MS;
+      scheduleNextRequest(route, delay, learned);
 
-      if (!retryable || attempt >= MAX_ATTEMPTS) return res;
+      // A wait beyond the cap still holds the queue, but this caller gets the error
+      // now instead of hanging on it.
+      if (!retryable || attempt >= MAX_ATTEMPTS || delay > MAX_COOLDOWN_MS) return res;
     }
   });
 }
 
+// A rate-limited error carries when the route's queue opens again, so the content
+// script can ask then.
+function httpError(res, route) {
+  const err = new Error(`HTTP ${res.status}`);
+  if (RETRY_STATUSES.has(res.status)) err.retryAt = scheduleFor(route);
+  return err;
+}
+
 async function fetchPlayerStats(userId) {
   const url = `https://www.faceit.com/api/statistics/v1/cs2/players/${encodeURIComponent(userId)}/seasons`;
-  const res = await throttledFetch(url, {
+  const res = await throttledFetch("stats", url, {
     method: "GET",
     credentials: "include",
     headers: { "Accept": "application/json" }
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) throw httpError(res, "stats");
   const data = await res.json();
   const seasons = data?.payload?.cs2?.seasons;
   if (!Array.isArray(seasons)) throw new Error("Seasons API returned invalid data");
@@ -150,7 +234,7 @@ async function getPlayerStats(userId, { force } = {}) {
     return { ...stats, cached: false, ts: Date.now() };
   } catch (err) {
     console.error(err);
-    return { ...EMPTY_STATS, cached: false, ts: Date.now(), error: String(err) };
+    return { ...EMPTY_STATS, cached: false, ts: Date.now(), error: String(err), retryAt: err?.retryAt ?? null };
   }
 }
 
@@ -163,12 +247,12 @@ async function pruneLegacyCache() {
 
 async function fetchMatch(matchId) {
   const url = `https://www.faceit.com/api/match/v2/match/${encodeURIComponent(matchId)}`;
-  const res = await fetch(url, {
+  const res = await throttledFetch("match", url, {
     method: "GET",
     credentials: "include",
     headers: { "Accept": "application/json" }
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) throw httpError(res, "match");
   return res.json();
 }
 
@@ -192,7 +276,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         sendResponse({ ok: false, error: "unknown message type" });
       }
     } catch (err) {
-      sendResponse({ ok: false, error: String(err?.message || err) });
+      sendResponse({ ok: false, error: String(err?.message || err), retryAt: err?.retryAt ?? null });
     }
   })();
   return true;
