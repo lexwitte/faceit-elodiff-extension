@@ -317,8 +317,16 @@
     ]);
   }
 
+  // A room-to-room navigation can leave the previous room's markup in the DOM
+  // (hidden) while the next one mounts, so the first `info` block in document
+  // order isn't necessarily the one on screen.
+  function findMountTarget() {
+    const targets = [...document.querySelectorAll('div[name="info"]')];
+    return targets.reverse().find((t) => t.getClientRects().length > 0) ?? targets[0] ?? null;
+  }
+
   function ensureRoot() {
-    const mountTarget = document.querySelector('div[name="info"]');
+    const mountTarget = findMountTarget();
     if (!mountTarget) return null;
 
     let root = document.getElementById(ROOT_ID);
@@ -501,8 +509,14 @@
         return;
       }
 
-      if (!now || !mounted || STATE.loading) return;
+      if (!now || !mounted) return;
       const panel = document.getElementById(PANEL_ID);
+      // FACEIT may swap the room's markup after we rendered into it; a fresh mount
+      // point gets an empty panel, which has to be filled again.
+      if (STATE.loading) {
+        if (panel && !panel.childElementCount) renderStatus("Fetching match…", "loading");
+        return;
+      }
       if (STATE.matchId !== now || !STATE.data) return refresh();
       if (panel && !panel.childElementCount) renderPanel(STATE.data);
       if (STATE.statsLoading) return;
@@ -512,17 +526,14 @@
       if (pending.length) loadStats(STATE.data, { players: pending });
     };
 
-    const wrap = (name) => {
-      const original = history[name];
-      history[name] = function () {
-        const result = original.apply(this, arguments);
-        setTimeout(tick, 50);
-        return result;
-      };
-    };
-    wrap("pushState");
-    wrap("replaceState");
-    window.addEventListener("popstate", () => setTimeout(tick, 50));
+    // Content scripts run in an isolated world, so patching `history` here never sees
+    // FACEIT's own pushState calls. Navigation API events cross worlds and also fire
+    // for pushState/replaceState; the interval below stays as the fallback.
+    if (window.navigation) {
+      navigation.addEventListener("currententrychange", () => setTimeout(tick, 50));
+    } else {
+      window.addEventListener("popstate", () => setTimeout(tick, 50));
+    }
     tick();
     setInterval(tick, 1500);
   }
