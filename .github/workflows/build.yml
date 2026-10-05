@@ -1,0 +1,39 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build zip
+        id: zip
+        run: echo "path=$(./scripts/build-zip.sh)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: extension-${{ github.sha }}
+          path: ${{ steps.zip.outputs.path }}
+          if-no-files-found: error
+
+      # One release per manifest version: bumping `version` and pushing to main
+      # publishes it. Pushes that keep the version leave its release untouched.
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ZIP: ${{ steps.zip.outputs.path }}
+        run: |
+          tag="v$(node -p 'require("./manifest.json").version')"
+          if gh release view "$tag" > /dev/null 2>&1; then
+            echo "::notice::Release $tag already exists; bump the manifest version to publish a new one."
+          else
+            gh release create "$tag" "$ZIP" --target "$GITHUB_SHA" --title "$tag" --generate-notes
+          fi
